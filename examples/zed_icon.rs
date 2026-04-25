@@ -26,7 +26,17 @@ fn main() {
             .set_button_image(key, image.clone())
             .expect("set_button_image");
     }
-
     device.flush().expect("flush");
-    println!("pushed '{}' to {} slots", image_path, count);
+
+    for zone in 0..kind.strip_zone_count() {
+        device
+            .set_strip_zone_image(zone, image.clone())
+            .expect("set_strip_zone_image");
+    }
+    println!(
+        "pushed '{}' to {} grid keys + {} strip zones",
+        image_path,
+        count,
+        kind.strip_zone_count()
+    );
 }

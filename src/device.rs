@@ -340,6 +340,28 @@ impl Ajazz {
         Ok(())
     }
 
+    /// Sets the image for a single zone of the N1's bottom LCD strip.
+    ///
+    /// The N1 has three strip zones above the grid that show icons for the top
+    /// controls. Zone indices are 0..=2 (left → right). Pushed immediately —
+    /// no flush() required, unlike the per-key cache.
+    pub fn set_strip_zone_image(&self, zone: u8, image: DynamicImage) -> Result<(), AjazzError> {
+        self.initialize()?;
+
+        if zone >= self.kind.strip_zone_count() {
+            return Err(AjazzError::InvalidKeyIndex(zone));
+        }
+        let format = self
+            .kind
+            .strip_zone_image_format()
+            .ok_or(AjazzError::UnsupportedOperation)?;
+
+        let image_data = convert_image_with_format(format, image)?;
+        // Native element indices for the strip start at 16 (after the 15 grid keys).
+        self.write_n1_image(16 + zone, &image_data)?;
+        Ok(())
+    }
+
     /// Set logo image
     pub fn set_logo_image(&self, image: DynamicImage) -> Result<(), AjazzError> {
         self.initialize()?;

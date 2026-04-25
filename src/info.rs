@@ -166,6 +166,30 @@ impl Kind {
         matches!(self, Kind::AkpN1)
     }
 
+    /// Number of independently-addressable image zones on the N1's bottom LCD strip.
+    /// Each zone shows the icon for one of the 3 top controls (2 function buttons + encoder).
+    /// Returns 0 for devices without the strip.
+    pub const fn strip_zone_count(&self) -> u8 {
+        match self {
+            Kind::AkpN1 => 3,
+            _ => 0,
+        }
+    }
+
+    /// Image format for the N1's LCD strip zones (80x80 JPEG, no rotation/mirror).
+    /// Verified by extracting a vendor-uploaded strip JPEG and reading its SOF marker.
+    pub fn strip_zone_image_format(&self) -> Option<ImageFormat> {
+        match self {
+            Kind::AkpN1 => Some(ImageFormat {
+                mode: ImageMode::JPEG,
+                size: (80, 80),
+                rotation: ImageRotation::Rot0,
+                mirror: ImageMirroring::None,
+            }),
+            _ => None,
+        }
+    }
+
     /// Image format used by the device kind
     pub const fn logo_image_format(&self) -> ImageFormat {
         match self {
