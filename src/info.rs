@@ -203,8 +203,10 @@ impl Kind {
             },
 
             Kind::AkpN1 => ImageFormat {
+                // Verified by extracting a vendor-app-uploaded grid-key JPEG and
+                // reading its SOF marker — the per-key LCD displays at 96x96.
                 mode: ImageMode::JPEG,
-                size: (126, 126),
+                size: (96, 96),
                 rotation: ImageRotation::Rot0,
                 mirror: ImageMirroring::None,
             },

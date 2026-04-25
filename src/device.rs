@@ -266,12 +266,13 @@ impl Ajazz {
             .map_err(|_| AjazzError::PoisonError)?;
 
         if self.kind.is_n1() {
-            let image_data = self.compose_n1_key_grid(&images)?;
-            self.write_n1_secondary_screen_image(
-                &image_data,
-                self.kind.logo_image_format().size.0 as u16,
-                self.kind.logo_image_format().size.1 as u16,
-            )?;
+            for image in images.iter() {
+                if image.key >= self.kind.display_key_count() {
+                    continue;
+                }
+                // Native element indices are 1-based: grid keys 1..15.
+                self.write_n1_image(image.key + 1, &image.image_data)?;
+            }
             images.clear();
             return Ok(());
         }
@@ -293,13 +294,15 @@ impl Ajazz {
         self.initialize()?;
 
         if self.kind.is_n1() {
-            let (width, height) = self
-                .kind
-                .lcd_strip_size()
-                .ok_or(AjazzError::UnsupportedOperation)?;
-            let image = DynamicImage::ImageRgba8(RgbaImage::new(width as u32, height as u32));
-            let image_data = convert_image_with_format(self.kind.logo_image_format(), image)?;
-            self.write_n1_secondary_screen_image(&image_data, width as u16, height as u16)?;
+            // Push a black JPEG to each grid LCD slot. The vendor's CLE command at
+            // startup also clears the strip zones; for now we just clear the 15 grid
+            // keys (LCD strip clearing can come later if needed).
+            let (kw, kh) = self.kind.key_image_format().size;
+            let blank = DynamicImage::ImageRgba8(RgbaImage::new(kw as u32, kh as u32));
+            let blank_jpeg = convert_image_with_format(self.kind.key_image_format(), blank)?;
+            for key in 0..self.kind.display_key_count() {
+                self.write_n1_image(key + 1, &blank_jpeg)?;
+            }
 
             let mut images = self
                 .image_cache
@@ -348,12 +351,12 @@ impl Ajazz {
         let image_data = convert_image_with_format(self.kind.logo_image_format(), image)?;
 
         if self.kind.is_n1() {
-            self.write_n1_secondary_screen_image(
-                &image_data,
-                self.kind.logo_image_format().size.0 as u16,
-                self.kind.logo_image_format().size.1 as u16,
-            )?;
-            return Ok(());
+            // The N1 doesn't have a single "logo image" target — its display surface
+            // is 15 grid keys + 3 strip zones, each addressed by element index 1..18
+            // via the BAT command (use `set_button_image` per key, or future
+            // `set_strip_zone_image` helpers). Reject here so callers can't silently
+            // misuse this entry point.
+            return Err(AjazzError::UnsupportedOperation);
         }
 
         self.hid
@@ -456,137 +459,42 @@ impl Ajazz {
         Ok(())
     }
 
-    fn write_n1_secondary_screen_image(
-        &self,
-        image_data: &[u8],
-        width: u16,
-        height: u16,
-    ) -> Result<(), AjazzError> {
-        let metadata =
-            self.n1_background_metadata_packet(image_data, 0, 0, width, height, 0x01)?;
-        self.write_n1_background_payload(&metadata, 0x00, 0x00)?;
-        std::thread::sleep(Duration::from_millis(20));
-        self.write_n1_background_payload(image_data, 0x01, 0x00)?;
-        Ok(())
-    }
-
-    fn write_n1_background_payload(
-        &self,
-        payload: &[u8],
-        byte_a: u8,
-        byte_b: u8,
-    ) -> Result<(), AjazzError> {
-        const MAX_CHUNK: usize = 0xFFFF;
+    /// Pushes one JPEG to a single N1 LCD slot.
+    ///
+    /// Element index is the device's native 1-based numbering:
+    ///   * 1..15 — the 15 LCD grid keys (top-left → bottom-right, row-major)
+    ///   * 16..18 — the three LCD strip zones (above the grid; left function
+    ///     button / encoder area / right function button — exact mapping TBD)
+    ///
+    /// Wire format (from RE'ing vendor traffic):
+    /// ```text
+    /// CRT BAT\0\0 <size_BE_high> <size_BE_low> <element_idx> 00 ...   (1 packet)
+    /// <jpeg bytes>                                                    (ceil(size/1024) packets, last zero-padded)
+    /// CRT STP\0\0                                                     (separator/commit)
+    /// ```
+    fn write_n1_image(&self, element_idx: u8, jpeg: &[u8]) -> Result<(), AjazzError> {
+        if jpeg.len() > u16::MAX as usize {
+            return Err(AjazzError::UnsupportedOperation);
+        }
         let params = WriteImageParameters::for_kind(self.kind);
 
-        if payload.is_empty() {
-            let header = self.n1_settings_pack_head(0, byte_a, byte_b, false)?;
-            self.hid.write(header.as_slice())?;
-            std::thread::sleep(Duration::from_millis(20));
-            return Ok(());
-        }
+        let mut header = vec![
+            0x00, 0x43, 0x52, 0x54, 0x00, 0x00, // CRT
+            0x42, 0x41, 0x54, 0x00, 0x00,       // BAT\0\0
+            ((jpeg.len() >> 8) & 0xff) as u8,   // size high (BE)
+            (jpeg.len() & 0xff) as u8,          // size low
+            element_idx,                         // element index (1-based, 1..18)
+            0x00,
+        ];
+        header.resize(params.image_report_length, 0x00);
+        self.hid.write(header.as_slice())?;
 
-        let mut offset = 0;
-        while offset < payload.len() {
-            let end = (offset + MAX_CHUNK).min(payload.len());
-            let chunk = &payload[offset..end];
+        self.write_image_data_reports(jpeg, params)?;
 
-            let header = self.n1_settings_pack_head(chunk.len(), byte_a, byte_b, false)?;
-            self.hid.write(header.as_slice())?;
-            std::thread::sleep(Duration::from_millis(20));
-            self.write_image_data_reports(chunk, params)?;
-            std::thread::sleep(Duration::from_millis(20));
+        let stp = self.kind.flush_packet();
+        self.hid.write(stp.as_slice())?;
 
-            offset = end;
-        }
         Ok(())
-    }
-
-    fn n1_settings_pack_head(
-        &self,
-        size: usize,
-        byte_a: u8,
-        byte_b: u8,
-        final_stage: bool,
-    ) -> Result<Vec<u8>, AjazzError> {
-        if size > 0xffff {
-            return Err(AjazzError::UnsupportedOperation);
-        }
-
-        let mut packet =
-            vec![0u8; WriteImageParameters::for_kind(self.kind).image_report_length];
-        packet[1..4].copy_from_slice(b"CRT");
-        packet[9] = if final_stage { 0x0f } else { 0x05 };
-        packet[10] = ((size >> 8) & 0xff) as u8;
-        packet[11] = (size & 0xff) as u8;
-        packet[12] = byte_a;
-        packet[13] = byte_b;
-        Ok(packet)
-    }
-
-    fn n1_background_metadata_packet(
-        &self,
-        image_data: &[u8],
-        x: u16,
-        y: u16,
-        width: u16,
-        height: u16,
-        mode: u8,
-    ) -> Result<Vec<u8>, AjazzError> {
-        if image_data.len() > u32::MAX as usize {
-            return Err(AjazzError::UnsupportedOperation);
-        }
-
-        let mut packet = Vec::with_capacity(23);
-        packet.extend_from_slice(b"CRT\0\0BGPIC");
-        packet.extend_from_slice(&(image_data.len() as u32).to_be_bytes());
-        packet.extend_from_slice(&x.to_be_bytes());
-        packet.extend_from_slice(&y.to_be_bytes());
-        packet.extend_from_slice(&width.to_be_bytes());
-        packet.extend_from_slice(&height.to_be_bytes());
-        packet.push(mode);
-        Ok(packet)
-    }
-
-    fn compose_n1_key_grid(&self, images: &[ImageCache]) -> Result<Vec<u8>, AjazzError> {
-        let (screen_width, screen_height) = self
-            .kind
-            .lcd_strip_size()
-            .ok_or(AjazzError::UnsupportedOperation)?;
-
-        let rows = self.kind.row_count() as u32;
-        let cols = self.kind.column_count() as u32;
-        let slot_width = self.kind.key_image_format().size.0 as u32;
-        let slot_height = self.kind.key_image_format().size.1 as u32;
-        let gap_x =
-            ((screen_width as u32).saturating_sub(cols * slot_width) / (cols + 1)).max(1);
-        let gap_y =
-            ((screen_height as u32).saturating_sub(rows * slot_height) / (rows + 1)).max(1);
-
-        let mut canvas = DynamicImage::ImageRgba8(RgbaImage::new(
-            screen_width as u32,
-            screen_height as u32,
-        ));
-
-        for image in images {
-            if image.key >= self.kind.display_key_count() {
-                continue;
-            }
-
-            let decoded = image::load_from_memory(&image.image_data)?;
-            let key = image.key as u32;
-            let row = key / cols;
-            let col = key % cols;
-            let x = gap_x + col * (slot_width + gap_x);
-            let y = gap_y + row * (slot_height + gap_y);
-
-            overlay(&mut canvas, &decoded.to_rgba8(), x as i64, y as i64);
-        }
-
-        Ok(convert_image_with_format(
-            self.kind.logo_image_format(),
-            canvas,
-        )?)
     }
 
     fn assert_write_complete(&self) -> Result<(), AjazzError> {
