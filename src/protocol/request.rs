@@ -63,7 +63,6 @@ pub(crate) trait AjazzRequestBuilder {
     fn brightness_packet(&self, percent: u8) -> Vec<u8>;
     fn keep_alive_packet(&self) -> Vec<u8>;
     fn initialize_packet(&self) -> Vec<u8>;
-    fn handshake_packet(&self) -> Vec<u8>;
     fn sleep_packet(&self) -> Vec<u8>;
     fn shutdown_packet(&self) -> Vec<u8>;
     fn clear_button_image_packet(&self, key: u8) -> Vec<u8>;
@@ -112,12 +111,6 @@ impl AjazzRequestBuilder for Kind {
 
     fn initialize_packet(&self) -> Vec<u8> {
         let mut buf = REQUEST_INITIALIZE.clone();
-        self.pad_packet(&mut buf);
-        buf
-    }
-
-    fn handshake_packet(&self) -> Vec<u8> {
-        let mut buf = codes::REQUEST_HANDSHAKE_BARE.to_vec();
         self.pad_packet(&mut buf);
         buf
     }

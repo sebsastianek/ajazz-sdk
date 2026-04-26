@@ -93,9 +93,6 @@ pub const REQUEST_CMD_KEEP_ALIVE: &[u8] = &[0x43, 0x4F, 0x4E, 0x4E, 0x45, 0x43, 
 pub const REQUEST_CMD_SHUTDOWN: &[u8] = &[0x43, 0x4C, 0x45, 0x00, 0x00, 0x44, 0x43];
 /// Request for sleep command
 pub const REQUEST_CMD_SLEEP: &[u8] = &[0x48, 0x41, 0x4E];
-/// Bare handshake packet ("HAN") — no CRT prefix, matches vendor `SDDevice::sendHandshakePack`
-/// Verified by disassembly of libSDLibrary.1.0.25.dylib sym `_ZN8SDDevice17sendHandshakePackEv`.
-pub const REQUEST_HANDSHAKE_BARE: &[u8] = &[0x00, 0x48, 0x41, 0x4E];
 /// Request for clear button image command
 pub const REQUEST_CMD_CLEAR_BUTTON_IMAGE: &[u8] = &[0x43, 0x4c, 0x45, 0x00, 0x00, 0x00];
 /// Request for flush command

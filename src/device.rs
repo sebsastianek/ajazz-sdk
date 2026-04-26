@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hidapi::{HidApi, HidDevice, HidError};
-use image::imageops::overlay;
 use image::{DynamicImage, RgbaImage};
 
 use crate::images::{convert_image, WriteImageParameters};
