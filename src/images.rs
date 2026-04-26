@@ -176,8 +176,9 @@ pub(crate) struct WriteImageParameters {
 impl WriteImageParameters {
     pub fn for_kind(kind: Kind) -> Self {
         let image_report_length = match kind {
+            // N1 uses v1-style commands but 1024-byte data + 1 report id (verified by capture).
+            kind if kind.is_v2_api() || kind.is_n1() => 1025,
             kind if kind.is_v1_api() => 513,
-            kind if kind.is_v2_api() => 1025,
             _ => 1024,
         };
 

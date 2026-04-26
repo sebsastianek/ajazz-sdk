@@ -22,6 +22,8 @@ pub const PID_AJAZZ_AKP03E: u16 = 0x3002;
 pub const PID_AJAZZ_AKP03R: u16 = 0x1003;
 /// Product ID of Ajazz AKP03R rev 2
 pub const PID_AJAZZ_AKP03R_REV2: u16 = 0x3003;
+/// Product ID of Ajazz N1 (15 LCD keys + 1 knob, AKP153-family rev)
+pub const PID_AJAZZ_AKP_N1: u16 = 0x3007;
 
 /// Offset of the button index in the input data
 pub const OFFSET_ACTION_CODE: usize = 9;
@@ -60,6 +62,21 @@ pub const ACTION_CODE_ENCODER_1_PRESS: u8 = 0x35;
 /// Action code for encoder 2 press
 pub const ACTION_CODE_ENCODER_2_PRESS: u8 = 0x34;
 
+// --- Ajazz N1 ---
+// Verified from captures of the macOS vendor app vs the physical device.
+// N1 grid keys 1..15 use linear codes 0x01..0x0f (3 cols × 5 rows, row-major).
+
+/// N1 left top function button (above LCD strip)
+pub const N1_ACTION_CODE_FUNCTION_BUTTON_LEFT: u8 = 0x1e;
+/// N1 right top function button (next to encoder)
+pub const N1_ACTION_CODE_FUNCTION_BUTTON_RIGHT: u8 = 0x1f;
+/// N1 encoder counter-clockwise tick
+pub const N1_ACTION_CODE_ENCODER_CCW: u8 = 0x32;
+/// N1 encoder clockwise tick
+pub const N1_ACTION_CODE_ENCODER_CW: u8 = 0x33;
+/// N1 encoder push (clicking the knob in)
+pub const N1_ACTION_CODE_ENCODER_PRESS: u8 = 0x23;
+
 /// Header of the request packet
 pub const REQUEST_HEADER: &[u8] = &[0x00, 0x43, 0x52, 0x54, 0x00, 0x00];
 
@@ -83,6 +100,12 @@ pub const REQUEST_CMD_FLUSH: &[u8] = &[0x53, 0x54, 0x50];
 /// Request for image packet.
 /// This packet should be sent before sending image data.
 pub const REQUEST_CMD_IMAGE_ANNOUNCE: &[u8] = &[0x42, 0x41, 0x54, 0x00, 0x00];
+/// N1 mode-switch command. Without this, the N1 emits standard HID keyboard
+/// reports for grid presses (i.e. the OS sees them as keys typed). Sending
+/// `MOD\0\0 33` puts the device into "software" mode where it sends vendor
+/// input reports via the 0xffa0 interface and stops emitting keyboard codes.
+/// Verified by replaying the macOS vendor app's startup sequence.
+pub const REQUEST_CMD_N1_SOFTWARE_MODE: &[u8] = &[0x4d, 0x4f, 0x44, 0x00, 0x00, 0x33];
 /// Request for logo image command
 pub const REQUEST_CMD_LOGO_IMAGE_V1: &[u8] = &[0x4c, 0x4f, 0x47, 0x00, 0x12, 0xc3, 0xc0, 0x01];
 /// Request for logo image command

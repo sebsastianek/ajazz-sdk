@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hidapi::{HidApi, HidDevice, HidError};
-use image::DynamicImage;
+use image::{DynamicImage, RgbaImage};
 
 use crate::images::{convert_image, WriteImageParameters};
 use crate::info::Kind;
@@ -65,7 +65,44 @@ impl Ajazz {
 
     // Internal function to connect to the device
     fn try_connect(hidapi: &HidApi, kind: Kind, serial: &str) -> Result<Ajazz, AjazzError> {
-        let device = hidapi.open_serial(kind.vendor_id(), kind.product_id(), serial)?;
+        let mut candidates = hidapi
+            .device_list()
+            .filter(|info| {
+                info.vendor_id() == kind.vendor_id() && info.product_id() == kind.product_id()
+            })
+            .filter(|info| info.serial_number() == Some(serial))
+            .collect::<Vec<_>>();
+
+        if kind.is_n1() {
+            // Prefer the input/control interface (0xffa0 / 0x0001). The 0x0002 interface
+            // appears to be for output (image data) only — opening it first leaves the
+            // SDK reading from a HID handle that never delivers button/encoder reports.
+            candidates.sort_by_key(|info| match (info.usage_page(), info.usage()) {
+                (0xffa0, 0x0001) => 0u8,
+                (0xffa0, 0x0002) => 1u8,
+                _ => 2u8,
+            });
+        }
+
+        let mut last_error = None;
+        for info in candidates {
+            match info.open_device(hidapi) {
+                Ok(device) => {
+                    return Ok(Ajazz {
+                        kind,
+                        hid: device,
+                        image_cache: RwLock::new(vec![]),
+                        initialized: false.into(),
+                    });
+                }
+                Err(e) => last_error = Some(e),
+            }
+        }
+
+        let device = match last_error {
+            Some(e) => return Err(e.into()),
+            None => hidapi.open_serial(kind.vendor_id(), kind.product_id(), serial)?,
+        };
 
         Ok(Ajazz {
             kind,
@@ -227,6 +264,18 @@ impl Ajazz {
             .write()
             .map_err(|_| AjazzError::PoisonError)?;
 
+        if self.kind.is_n1() {
+            for image in images.iter() {
+                if image.key >= self.kind.display_key_count() {
+                    continue;
+                }
+                // Native element indices are 1-based: grid keys 1..15.
+                self.write_n1_image(image.key + 1, &image.image_data)?;
+            }
+            images.clear();
+            return Ok(());
+        }
+
         for image in images.iter() {
             self.write_key_image(image.key, &image.image_data)?;
         }
@@ -242,6 +291,26 @@ impl Ajazz {
     /// they will appear on the device!
     pub fn clear_all_button_images(&self) -> Result<(), AjazzError> {
         self.initialize()?;
+
+        if self.kind.is_n1() {
+            // Push a black JPEG to each grid LCD slot. The vendor's CLE command at
+            // startup also clears the strip zones; for now we just clear the 15 grid
+            // keys (LCD strip clearing can come later if needed).
+            let (kw, kh) = self.kind.key_image_format().size;
+            let blank = DynamicImage::ImageRgba8(RgbaImage::new(kw as u32, kh as u32));
+            let blank_jpeg = convert_image_with_format(self.kind.key_image_format(), blank)?;
+            for key in 0..self.kind.display_key_count() {
+                self.write_n1_image(key + 1, &blank_jpeg)?;
+            }
+
+            let mut images = self
+                .image_cache
+                .write()
+                .map_err(|_| AjazzError::PoisonError)?;
+            images.clear();
+            return Ok(());
+        }
+
         self.clear_button_image(codes::CMD_CLEAR_ALL)?;
 
         if self.kind.is_v2_api() {
@@ -270,6 +339,28 @@ impl Ajazz {
         Ok(())
     }
 
+    /// Sets the image for a single zone of the N1's bottom LCD strip.
+    ///
+    /// The N1 has three strip zones above the grid that show icons for the top
+    /// controls. Zone indices are 0..=2 (left → right). Pushed immediately —
+    /// no flush() required, unlike the per-key cache.
+    pub fn set_strip_zone_image(&self, zone: u8, image: DynamicImage) -> Result<(), AjazzError> {
+        self.initialize()?;
+
+        if zone >= self.kind.strip_zone_count() {
+            return Err(AjazzError::InvalidKeyIndex(zone));
+        }
+        let format = self
+            .kind
+            .strip_zone_image_format()
+            .ok_or(AjazzError::UnsupportedOperation)?;
+
+        let image_data = convert_image_with_format(format, image)?;
+        // Native element indices for the strip start at 16 (after the 15 grid keys).
+        self.write_n1_image(16 + zone, &image_data)?;
+        Ok(())
+    }
+
     /// Set logo image
     pub fn set_logo_image(&self, image: DynamicImage) -> Result<(), AjazzError> {
         self.initialize()?;
@@ -279,6 +370,16 @@ impl Ajazz {
         }
 
         let image_data = convert_image_with_format(self.kind.logo_image_format(), image)?;
+
+        if self.kind.is_n1() {
+            // The N1 doesn't have a single "logo image" target — its display surface
+            // is 15 grid keys + 3 strip zones, each addressed by element index 1..18
+            // via the BAT command (use `set_button_image` per key, or future
+            // `set_strip_zone_image` helpers). Reject here so callers can't silently
+            // misuse this entry point.
+            return Err(AjazzError::UnsupportedOperation);
+        }
+
         self.hid
             .write(self.kind.logo_image_packet(&image_data).as_slice())?;
         self.hid.write(self.kind.flush_packet().as_slice())?;
@@ -295,6 +396,22 @@ impl Ajazz {
         }
 
         self.initialized.store(true, Ordering::Release);
+
+        if self.kind.is_n1() {
+            // N1 powers up in keyboard mode (each grid press becomes an OS key event).
+            // Send MOD\0\0 33 to switch into software mode where the device emits
+            // vendor input reports via the 0xffa0 interface and the host owns the screen.
+            // The vendor app's startup capture sends DIS first, then this; replaying that.
+            let init = self.kind.initialize_packet();
+            self.hid.write(init.as_slice())?;
+            std::thread::sleep(Duration::from_millis(20));
+
+            let mode = self.kind.n1_software_mode_packet();
+            self.hid.write(mode.as_slice())?;
+            std::thread::sleep(Duration::from_millis(20));
+
+            return Ok(());
+        }
 
         let packet = self.kind.initialize_packet();
         self.hid.write(packet.as_slice())?;
@@ -359,6 +476,44 @@ impl Ajazz {
             bytes_remaining -= this_length;
             page_number += 1;
         }
+
+        Ok(())
+    }
+
+    /// Pushes one JPEG to a single N1 LCD slot.
+    ///
+    /// Element index is the device's native 1-based numbering:
+    ///   * 1..15 — the 15 LCD grid keys (top-left → bottom-right, row-major)
+    ///   * 16..18 — the three LCD strip zones (above the grid; left function
+    ///     button / encoder area / right function button — exact mapping TBD)
+    ///
+    /// Wire format (from RE'ing vendor traffic):
+    /// ```text
+    /// CRT BAT\0\0 <size_BE_high> <size_BE_low> <element_idx> 00 ...   (1 packet)
+    /// <jpeg bytes>                                                    (ceil(size/1024) packets, last zero-padded)
+    /// CRT STP\0\0                                                     (separator/commit)
+    /// ```
+    fn write_n1_image(&self, element_idx: u8, jpeg: &[u8]) -> Result<(), AjazzError> {
+        if jpeg.len() > u16::MAX as usize {
+            return Err(AjazzError::UnsupportedOperation);
+        }
+        let params = WriteImageParameters::for_kind(self.kind);
+
+        let mut header = vec![
+            0x00, 0x43, 0x52, 0x54, 0x00, 0x00, // CRT
+            0x42, 0x41, 0x54, 0x00, 0x00,       // BAT\0\0
+            ((jpeg.len() >> 8) & 0xff) as u8,   // size high (BE)
+            (jpeg.len() & 0xff) as u8,          // size low
+            element_idx,                         // element index (1-based, 1..18)
+            0x00,
+        ];
+        header.resize(params.image_report_length, 0x00);
+        self.hid.write(header.as_slice())?;
+
+        self.write_image_data_reports(jpeg, params)?;
+
+        let stp = self.kind.flush_packet();
+        self.hid.write(stp.as_slice())?;
 
         Ok(())
     }

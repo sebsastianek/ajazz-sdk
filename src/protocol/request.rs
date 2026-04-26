@@ -41,6 +41,10 @@ static REQUEST_FLUSH: Lazy<Vec<u8>> = Lazy::new(|| format_request(codes::REQUEST
 static REQUEST_IMAGE_ANNOUNCE: Lazy<Vec<u8>> =
     Lazy::new(|| format_request(codes::REQUEST_CMD_IMAGE_ANNOUNCE));
 
+/// Request that switches the N1 into software/vendor input mode
+static REQUEST_N1_SOFTWARE_MODE: Lazy<Vec<u8>> =
+    Lazy::new(|| format_request(codes::REQUEST_CMD_N1_SOFTWARE_MODE));
+
 /// Request for logo image command
 static REQUEST_LOGO_IMAGE_V1: Lazy<Vec<u8>> =
     Lazy::new(|| format_request(codes::REQUEST_CMD_LOGO_IMAGE_V1));
@@ -63,6 +67,7 @@ pub(crate) trait AjazzRequestBuilder {
     fn shutdown_packet(&self) -> Vec<u8>;
     fn clear_button_image_packet(&self, key: u8) -> Vec<u8>;
     fn flush_packet(&self) -> Vec<u8>;
+    fn n1_software_mode_packet(&self) -> Vec<u8>;
 
     fn image_announce_packet(&self, index: u8, image_data: &[u8]) -> Vec<u8>;
     fn key_image_announce_packet(&self, key: u8, image_data: &[u8]) -> Vec<u8>;
@@ -72,7 +77,9 @@ pub(crate) trait AjazzRequestBuilder {
 
 impl Kind {
     fn packet_length(&self) -> usize {
-        if self.is_v2_api() {
+        // N1 uses v1-style protocol commands but 1024-byte HID output reports
+        // (verified by capturing macOS vendor app traffic to the device).
+        if self.is_v2_api() || self.is_n1() {
             1024
         } else {
             512
@@ -132,6 +139,12 @@ impl AjazzRequestBuilder for Kind {
 
     fn flush_packet(&self) -> Vec<u8> {
         let mut buf = REQUEST_FLUSH.clone();
+        self.pad_packet(&mut buf);
+        buf
+    }
+
+    fn n1_software_mode_packet(&self) -> Vec<u8> {
+        let mut buf = REQUEST_N1_SOFTWARE_MODE.clone();
         self.pad_packet(&mut buf);
         buf
     }

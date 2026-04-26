@@ -25,6 +25,8 @@ impl AjazzProtocolParser for Kind {
         let action_code = data[codes::OFFSET_ACTION_CODE];
 
         match self {
+            kind if kind.is_n1() => parse_n1_input(*kind, action_code),
+
             kind if kind.is_v1_api() => {
                 let mut states = vec![false; self.key_count() as usize];
                 if action_code != codes::ACTION_CODE_NOP {
@@ -189,4 +191,59 @@ fn is_akp03_button_press(input: u8) -> bool {
             | codes::ACTION_CODE_BUTTON_8
             | codes::ACTION_CODE_BUTTON_9
     )
+}
+
+/// Dispatches one N1 input report.
+///
+/// N1 reports follow `ACK\0\0 OK\0\0 <action_code> <state> ...`:
+///   * action_code 0x01..0x0f: 15 LCD grid keys (button index 0..14)
+///   * action_code 0x1e:       left top function button  (button index 15)
+///   * action_code 0x1f:       right top function button (button index 16)
+///   * action_code 0x32:       single encoder, counter-clockwise tick
+///   * action_code 0x33:       single encoder, clockwise tick
+fn parse_n1_input(kind: Kind, action_code: u8) -> Result<AjazzInput, AjazzError> {
+    if action_code == codes::ACTION_CODE_NOP {
+        return Ok(AjazzInput::ButtonStateChange(vec![
+            false;
+            kind.key_count() as usize
+        ]));
+    }
+
+    match action_code {
+        // Grid keys 1..=15
+        1..=15 => {
+            let mut states = vec![false; kind.key_count() as usize];
+            states[(action_code - 1) as usize] = true;
+            Ok(AjazzInput::ButtonStateChange(states))
+        }
+        // Function buttons → indices 15 and 16 (after the 15 grid keys)
+        codes::N1_ACTION_CODE_FUNCTION_BUTTON_LEFT => {
+            let mut states = vec![false; kind.key_count() as usize];
+            states[15] = true;
+            Ok(AjazzInput::ButtonStateChange(states))
+        }
+        codes::N1_ACTION_CODE_FUNCTION_BUTTON_RIGHT => {
+            let mut states = vec![false; kind.key_count() as usize];
+            states[16] = true;
+            Ok(AjazzInput::ButtonStateChange(states))
+        }
+        codes::N1_ACTION_CODE_ENCODER_CCW => {
+            Ok(AjazzInput::EncoderTwist(vec![-1]))
+        }
+        codes::N1_ACTION_CODE_ENCODER_CW => {
+            Ok(AjazzInput::EncoderTwist(vec![1]))
+        }
+        codes::N1_ACTION_CODE_ENCODER_PRESS => {
+            // Press and release both arrive as separate reports with this action code.
+            // The state translator XORs on each occurrence, so a single `true` here
+            // toggles between EncoderDown and EncoderUp on alternating events.
+            Ok(AjazzInput::EncoderStateChange(vec![true]))
+        }
+        other => {
+            // Don't error — surface unknown reports to stderr but keep the reader alive
+            // so a single unmapped button (or a stray report) doesn't tear down events.
+            eprintln!("[ajazz-sdk] N1: unknown action code 0x{:02x}", other);
+            Ok(AjazzInput::NoData)
+        }
+    }
 }

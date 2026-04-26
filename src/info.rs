@@ -30,6 +30,8 @@ pub enum Kind {
     Akp03R,
     /// Ajazz AKP03R rev 2
     Akp03RRev2,
+    /// Ajazz N1
+    AkpN1,
 }
 
 impl Kind {
@@ -49,6 +51,7 @@ impl Kind {
                 codes::PID_AJAZZ_AKP03E => Some(Kind::Akp03E),
                 codes::PID_AJAZZ_AKP03R => Some(Kind::Akp03R),
                 codes::PID_AJAZZ_AKP03R_REV2 => Some(Kind::Akp03RRev2),
+                codes::PID_AJAZZ_AKP_N1 => Some(Kind::AkpN1),
                 _ => None,
             },
 
@@ -67,6 +70,7 @@ impl Kind {
             Kind::Akp03E => codes::PID_AJAZZ_AKP03E,
             Kind::Akp03R => codes::PID_AJAZZ_AKP03R,
             Kind::Akp03RRev2 => codes::PID_AJAZZ_AKP03R_REV2,
+            Kind::AkpN1 => codes::PID_AJAZZ_AKP_N1,
         }
     }
 
@@ -81,6 +85,7 @@ impl Kind {
             Kind::Akp03E => codes::VENDOR_ID_MIRABOX_V2,
             Kind::Akp03R => codes::VENDOR_ID_MIRABOX_V2,
             Kind::Akp03RRev2 => codes::VENDOR_ID_MIRABOX_V2,
+            Kind::AkpN1 => codes::VENDOR_ID_MIRABOX_V2,
         }
     }
 
@@ -88,6 +93,8 @@ impl Kind {
     pub const fn key_count(&self) -> u8 {
         match self {
             Kind::Akp153 | Kind::Akp153E | Kind::Akp153R => 15 + 3,
+            // N1: 15 LCD grid keys + 2 top function buttons (encoder counted separately)
+            Kind::AkpN1 => 15 + 2,
             Kind::Akp815 => 15,
             Kind::Akp03 | Kind::Akp03E | Kind::Akp03R | Kind::Akp03RRev2 => 6 + 3,
         }
@@ -97,6 +104,8 @@ impl Kind {
     pub const fn display_key_count(&self) -> u8 {
         match self {
             Kind::Akp03 | Kind::Akp03E | Kind::Akp03R | Kind::Akp03RRev2 => 6,
+            // N1: only the 15 LCD grid keys have per-key displays (function buttons share LCD strip)
+            Kind::AkpN1 => 15,
             _ => self.key_count(),
         }
     }
@@ -105,6 +114,7 @@ impl Kind {
     pub const fn row_count(&self) -> u8 {
         match self {
             Kind::Akp153 | Kind::Akp153E | Kind::Akp153R => 3,
+            Kind::AkpN1 => 5,
             Kind::Akp815 => 5,
             Kind::Akp03 | Kind::Akp03E | Kind::Akp03R | Kind::Akp03RRev2 => 2,
         }
@@ -114,6 +124,7 @@ impl Kind {
     pub const fn column_count(&self) -> u8 {
         match self {
             Kind::Akp153 | Kind::Akp153E | Kind::Akp153R => 6,
+            Kind::AkpN1 => 3,
             Kind::Akp815 => 3,
             Kind::Akp03 | Kind::Akp03E | Kind::Akp03R | Kind::Akp03RRev2 => 3,
         }
@@ -123,6 +134,7 @@ impl Kind {
     pub const fn encoder_count(&self) -> u8 {
         match self {
             Kind::Akp03 | Kind::Akp03E | Kind::Akp03R | Kind::Akp03RRev2 => 3,
+            Kind::AkpN1 => 1,
             _ => 0,
         }
     }
@@ -130,7 +142,7 @@ impl Kind {
     /// Size of the LCD strip on the device
     pub const fn lcd_strip_size(&self) -> Option<(usize, usize)> {
         match self {
-            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R => Some((854, 480)),
+            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R | Kind::AkpN1 => Some((854, 480)),
             Kind::Akp815 => Some((800, 480)),
             _ => None,
         }
@@ -149,6 +161,35 @@ impl Kind {
         (self.row_count(), self.column_count())
     }
 
+    /// Returns true for Ajazz N1.
+    pub const fn is_n1(&self) -> bool {
+        matches!(self, Kind::AkpN1)
+    }
+
+    /// Number of independently-addressable image zones on the N1's bottom LCD strip.
+    /// Each zone shows the icon for one of the 3 top controls (2 function buttons + encoder).
+    /// Returns 0 for devices without the strip.
+    pub const fn strip_zone_count(&self) -> u8 {
+        match self {
+            Kind::AkpN1 => 3,
+            _ => 0,
+        }
+    }
+
+    /// Image format for the N1's LCD strip zones (80x80 JPEG, no rotation/mirror).
+    /// Verified by extracting a vendor-uploaded strip JPEG and reading its SOF marker.
+    pub fn strip_zone_image_format(&self) -> Option<ImageFormat> {
+        match self {
+            Kind::AkpN1 => Some(ImageFormat {
+                mode: ImageMode::JPEG,
+                size: (80, 80),
+                rotation: ImageRotation::Rot0,
+                mirror: ImageMirroring::None,
+            }),
+            _ => None,
+        }
+    }
+
     /// Image format used by the device kind
     pub const fn logo_image_format(&self) -> ImageFormat {
         match self {
@@ -159,7 +200,7 @@ impl Kind {
                 mirror: ImageMirroring::None,
             },
 
-            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R => ImageFormat {
+            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R | Kind::AkpN1 => ImageFormat {
                 mode: ImageMode::JPEG,
                 size: (854, 480),
                 rotation: ImageRotation::Rot0,
@@ -183,6 +224,15 @@ impl Kind {
                 size: (85, 85),
                 rotation: ImageRotation::Rot90,
                 mirror: ImageMirroring::Both,
+            },
+
+            Kind::AkpN1 => ImageFormat {
+                // Verified by extracting a vendor-app-uploaded grid-key JPEG and
+                // reading its SOF marker — the per-key LCD displays at 96x96.
+                mode: ImageMode::JPEG,
+                size: (96, 96),
+                rotation: ImageRotation::Rot0,
+                mirror: ImageMirroring::None,
             },
 
             Kind::Akp815 => ImageFormat {
@@ -212,7 +262,7 @@ impl Kind {
     pub const fn is_v1_api(&self) -> bool {
         matches!(
             self,
-            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R | Kind::Akp815
+            Kind::Akp153 | Kind::Akp153E | Kind::Akp153R | Kind::AkpN1 | Kind::Akp815
         )
     }
 
